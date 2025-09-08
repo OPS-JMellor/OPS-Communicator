@@ -6,7 +6,7 @@ function sendDailyAnnouncements() {
   const now = new Date();
   const currentHour = now.getHours();
   const currentDay = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
-  const dayNames = ['Sun', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const currentDayName = dayNames[currentDay];
   
   // Get all data from the sheet (assuming headers in row 1)
@@ -401,7 +401,7 @@ function simulateHourlyCheckAtTime(simulatedHour) {
   // Get current date info but override the hour
   const now = new Date();
   const currentDay = now.getDay();
-  const dayNames = ['Sun', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const currentDayName = dayNames[currentDay];
   const today = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd');
   
@@ -480,6 +480,7 @@ function onOpen() {
     .addSeparator()
     .addItem('🔑 Setup & Authorize', 'setupAndAuthorize')
     .addItem('🧪 Test Send Now', 'testAnnouncements')
+    .addItem('📤 Manual Send', 'showManualSendDialog')
     .addItem('🕐 Simulate Hourly Check', 'simulateHourlyCheck')
     .addSeparator()
     .addItem('📊 Check Status', 'checkStatus')
@@ -625,6 +626,73 @@ function viewTriggerInfo() {
     `The script automatically checks every hour for scheduled announcements.`,
     ui.ButtonSet.OK
   );
+}
+
+function showManualSendDialog() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  if (data.length < 2) {
+    ui.alert('No Communications Found', 'Please add a communication first using "Add New Communication".', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const headers = data[0];
+  const nameCol = headers.indexOf('Communication Name');
+  const activeCol = headers.indexOf('Active');
+  const timeCol = headers.indexOf('Send Time');
+  const daysCol = headers.indexOf('Send Days');
+  
+  if (nameCol === -1) {
+    ui.alert('Invalid Sheet', 'Sheet headers not found. Please use "Setup & Authorize" first.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // Build list of communications
+  let commList = '';
+  let validComms = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const name = row[nameCol] || `Communication ${i}`;
+    const active = row[activeCol] ? '✅ Active' : '⏸️ Inactive';
+    const time = row[timeCol] || 'No time set';
+    const days = row[daysCol] || 'No days set';
+    const rowNum = i + 1; // 1-based row number
+    
+    commList += `${rowNum}. ${name}\n   Status: ${active} | Time: ${time} | Days: ${days}\n\n`;
+    validComms.push(rowNum);
+  }
+  
+  const response = ui.prompt(
+    '📤 Manual Send',
+    `Select a communication to send immediately:\n\n${commList}Enter the row number (e.g., 2, 3, 4...):\n\n⚠️ This will send the email RIGHT NOW to all configured recipients, regardless of the scheduled time or day settings.`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  
+  const selectedRow = parseInt(response.getResponseText().trim());
+  
+  if (!selectedRow || !validComms.includes(selectedRow)) {
+    ui.alert('❌ Invalid Selection', `Please enter a valid row number from: ${validComms.join(', ')}`, ui.ButtonSet.OK);
+    return;
+  }
+  
+  // Confirm before sending
+  const rowData = data[selectedRow - 1];
+  const commName = rowData[nameCol] || `Communication ${selectedRow}`;
+  const confirmResponse = ui.alert(
+    '🚨 Confirm Manual Send',
+    `Are you sure you want to send "${commName}" RIGHT NOW?\n\nThis will send the email immediately to all configured recipients with today's date placeholders filled in.`,
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (confirmResponse !== ui.Button.YES) return;
+  
+  // Send the communication
+  sendCommunicationManually(selectedRow);
 }
 
 function showAddCommunicationDialog() {
@@ -1685,5 +1753,72 @@ function setupSheetHeaders() {
     sheet.setColumnWidth(7, 300); // Message
     sheet.setColumnWidth(8, 150); // Send Days
     sheet.setColumnWidth(9, 100); // Sent Today
+  }
+}
+
+function sendCommunicationManually(rowNumber) {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const data = sheet.getDataRange().getValues();
+  
+  if (data.length < rowNumber) {
+    ui.alert('❌ Error', 'Invalid row number - communication not found.', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const headers = data[0];
+  const rowData = data[rowNumber - 1]; // Convert to 0-based index
+  
+  // Find column indices
+  const nameCol = headers.indexOf('Communication Name');
+  const fromCol = headers.indexOf('From Email');
+  const toCol = headers.indexOf('To Emails');
+  const subjectCol = headers.indexOf('Subject');
+  const messageCol = headers.indexOf('Message');
+  const sentTodayCol = headers.indexOf('Sent Today');
+  
+  const commName = rowData[nameCol] || `Communication ${rowNumber}`;
+  const now = new Date();
+  
+  // Check if communication has all required fields
+  if (!rowData[fromCol] || !rowData[toCol] || !rowData[subjectCol] || !rowData[messageCol]) {
+    ui.alert('❌ Incomplete Communication', `The communication "${commName}" is missing required fields (From Email, To Emails, Subject, or Message).`, ui.ButtonSet.OK);
+    return;
+  }
+  
+  try {
+    const fromEmail = rowData[fromCol];
+    const toEmails = rowData[toCol];
+    const subject = replacePlaceholders(rowData[subjectCol], now);
+    const message = replacePlaceholders(rowData[messageCol], now);
+    
+    // Split multiple recipients if comma-separated
+    const recipients = toEmails.split(',').map(email => email.trim()).join(',');
+    
+    MailApp.sendEmail({
+      to: recipients,
+      subject: subject,
+      htmlBody: message,
+      replyTo: fromEmail
+    });
+    
+    // Mark as sent today
+    const today = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    sheet.getRange(rowNumber, sentTodayCol + 1).setValue(today);
+    
+    console.log(`Manual send: "${commName}" sent successfully to ${recipients}`);
+    
+    ui.alert(
+      '✅ Email Sent Successfully!', 
+      `"${commName}" has been sent manually!\n\n` +
+      `To: ${recipients}\n` +
+      `Subject: ${subject}\n\n` +
+      `The communication has been marked as sent today and will not be sent again automatically until tomorrow.`,
+      ui.ButtonSet.OK
+    );
+    
+  } catch (error) {
+    console.error(`Error in manual send for "${commName}":`, error);
+    ui.alert('❌ Send Failed', `Error sending "${commName}":\n\n${error.toString()}`, ui.ButtonSet.OK);
   }
 }
